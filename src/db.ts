@@ -150,6 +150,23 @@ export async function initDatabase(): Promise<Database> {
 
   db.run(`CREATE INDEX IF NOT EXISTS idx_order_images_order ON order_images(order_id)`);
 
+  db.run(`
+    CREATE TABLE IF NOT EXISTS reply_versions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_id INTEGER NOT NULL,
+      version_number INTEGER NOT NULL DEFAULT 1,
+      reply_text TEXT NOT NULL,
+      is_confirmed INTEGER NOT NULL DEFAULT 0,
+      confirmed_by TEXT,
+      confirmed_at DATETIME,
+      created_by TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
+    )
+  `);
+
+  db.run(`CREATE INDEX IF NOT EXISTS idx_reply_versions_order ON reply_versions(order_id)`);
+
   saveDatabase();
   return db;
 }

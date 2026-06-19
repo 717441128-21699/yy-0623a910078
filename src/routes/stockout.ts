@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { query, queryOne, run } from '../db';
-import { StockoutPlan, Product, OrderItem, Order } from '../types';
+import { StockoutPlan, Product, OrderItem, Order, ReplyVersion } from '../types';
 
 const router = Router();
 
@@ -262,16 +262,39 @@ router.get('/order/:orderId/reply', (req: Request, res: Response) => {
 
   const replyText = generateReplyContent(orderId);
 
+  const lastVersion = queryOne(
+    'SELECT version_number FROM reply_versions WHERE order_id = ? ORDER BY version_number DESC LIMIT 1',
+    [orderId]
+  ) as { version_number: number } | undefined;
+
+  const nextVersion = (lastVersion?.version_number || 0) + 1;
+
+  const { created_by } = req.query;
+  const result = run(
+    `INSERT INTO reply_versions (order_id, version_number, reply_text, created_by)
+     VALUES (?, ?, ?, ?)`,
+    [orderId, nextVersion, replyText, (created_by as string) || null]
+  );
+
+  const savedVersion = queryOne('SELECT * FROM reply_versions WHERE id = ?', [result.lastInsertRowid]) as any;
+
+  const converted: any = {};
+  for (const [key, value] of Object.entries(savedVersion)) {
+    (converted as any)[key] = typeof value === 'bigint' ? Number(value) : value;
+  }
+  converted.is_confirmed = !!converted.is_confirmed;
+
   res.json({
     order_id: orderId,
     reply_text: replyText,
+    version: converted,
     generated_at: new Date().toISOString(),
   });
 });
 
 router.post('/order/:orderId/confirm', (req: Request, res: Response) => {
   const orderId = parseInt(req.params.orderId);
-  const { reply_text, confirmed_by } = req.body;
+  const { reply_text, confirmed_by, version_id } = req.body;
 
   const order = queryOne('SELECT * FROM orders WHERE id = ?', [orderId]) as Order;
   if (!order) {
@@ -280,21 +303,105 @@ router.post('/order/:orderId/confirm', (req: Request, res: Response) => {
   }
 
   run(
+    'UPDATE reply_versions SET is_confirmed = 0 WHERE order_id = ? AND is_confirmed = 1',
+    [orderId]
+  );
+
+  if (version_id) {
+    const version = queryOne('SELECT * FROM reply_versions WHERE id = ? AND order_id = ?', [version_id, orderId]) as any;
+    if (!version) {
+      res.status(404).json({ error: '回复版本不存在' });
+      return;
+    }
+    run(
+      'UPDATE reply_versions SET is_confirmed = 1, confirmed_by = ?, confirmed_at = CURRENT_TIMESTAMP WHERE id = ?',
+      [confirmed_by || null, version_id]
+    );
+  }
+
+  run(
     `UPDATE orders SET status = 'ready_to_ship', updated_at = CURRENT_TIMESTAMP
      WHERE id = ?`,
     [orderId]
   );
 
+  const finalReplyText = version_id
+    ? (queryOne('SELECT reply_text FROM reply_versions WHERE id = ?', [version_id]) as any)?.reply_text
+    : (reply_text || generateReplyContent(orderId));
+
+  if (!version_id) {
+    const lastVersion = queryOne(
+      'SELECT version_number FROM reply_versions WHERE order_id = ? ORDER BY version_number DESC LIMIT 1',
+      [orderId]
+    ) as { version_number: number } | undefined;
+
+    const nextVersion = (lastVersion?.version_number || 0) + 1;
+    run(
+      `INSERT INTO reply_versions (order_id, version_number, reply_text, is_confirmed, confirmed_by, confirmed_at, created_by)
+       VALUES (?, ?, ?, 1, ?, CURRENT_TIMESTAMP, ?)`,
+      [orderId, nextVersion, finalReplyText, confirmed_by || null, confirmed_by || null]
+    );
+  }
+
   run(
     `INSERT INTO order_logs (order_id, action, operator, detail)
      VALUES (?, 'stockout_confirmed', ?, ?)`,
-    [orderId, confirmed_by || null, reply_text || null]
+    [orderId, confirmed_by || null, finalReplyText || null]
   );
+
+  const confirmedVersions = query(
+    'SELECT * FROM reply_versions WHERE order_id = ? AND is_confirmed = 1 ORDER BY version_number DESC LIMIT 1',
+    [orderId]
+  );
+
+  const confirmedVersion = confirmedVersions[0];
+  if (confirmedVersion) {
+    const cv: any = {};
+    for (const [key, value] of Object.entries(confirmedVersion)) {
+      (cv as any)[key] = typeof value === 'bigint' ? Number(value) : value;
+    }
+    cv.is_confirmed = !!cv.is_confirmed;
+  }
 
   const updated = queryOne('SELECT * FROM orders WHERE id = ?', [orderId]) as Order;
   res.json({
     order: updated,
-    reply_text: reply_text || generateReplyContent(orderId),
+    reply_text: finalReplyText,
+    confirmed_version: confirmedVersion || null,
+  });
+});
+
+router.get('/order/:orderId/reply-history', (req: Request, res: Response) => {
+  const orderId = parseInt(req.params.orderId);
+
+  const order = queryOne('SELECT * FROM orders WHERE id = ?', [orderId]);
+  if (!order) {
+    res.status(404).json({ error: '订单不存在' });
+    return;
+  }
+
+  const versions = query(
+    'SELECT * FROM reply_versions WHERE order_id = ? ORDER BY version_number ASC',
+    [orderId]
+  );
+
+  const convertedVersions = versions.map((v: any) => {
+    const cv: any = {};
+    for (const [key, value] of Object.entries(v)) {
+      (cv as any)[key] = typeof value === 'bigint' ? Number(value) : value;
+    }
+    cv.is_confirmed = !!cv.is_confirmed;
+    return cv;
+  });
+
+  const confirmedVersion = convertedVersions.find((v: any) => v.is_confirmed);
+
+  res.json({
+    order_id: orderId,
+    versions: convertedVersions,
+    total_versions: convertedVersions.length,
+    confirmed_version_id: confirmedVersion?.id || null,
+    confirmed_version_number: confirmedVersion?.version_number || null,
   });
 });
 

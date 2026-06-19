@@ -169,26 +169,30 @@ router.post('/parse', (req: Request, res: Response) => {
   const itemsWithSimilar = result.items.map(item => {
     const similar = findSimilarProducts(item.product_name, item.specification, item.brand);
 
+    const allByName = findSimilarProducts(item.product_name, '', '');
+
     const exactMatches = similar.filter(p =>
       p.name === item.product_name &&
       (!item.specification || p.specification === item.specification) &&
       (!item.brand || p.brand === item.brand)
     );
 
-    const sameNameDiffSpec = similar.filter(p =>
+    const sameNameDiffSpec = allByName.filter(p =>
       p.name === item.product_name && p.specification !== (item.specification || '')
     );
 
     const hasMultipleSpecs = sameNameDiffSpec.length > 0;
     const hasExactMatch = exactMatches.length > 0;
 
-    let warning: string | null = null;
-    if (hasMultipleSpecs) {
-      warning = `品名"${item.product_name}"存在多种规格（${sameNameDiffSpec.map(p => p.brand + ' ' + p.specification).join('、')}），请确认具体型号，防止发错货`;
+    let specWarning: string | null = null;
+    if (hasExactMatch && hasMultipleSpecs) {
+      specWarning = `已匹配${item.brand ? ' ' + item.brand : ''} ${item.product_name} ${item.specification}，但同名还有其他规格：${sameNameDiffSpec.map(p => p.brand + ' ' + p.specification).join('、')}，请确认是否正确`;
+    } else if (hasMultipleSpecs) {
+      specWarning = `品名"${item.product_name}"存在多种规格（${sameNameDiffSpec.map(p => p.brand + ' ' + p.specification).join('、')}），请确认具体型号，防止发错货`;
     } else if (!hasExactMatch && similar.length > 0) {
-      warning = `未找到完全匹配的产品，但有 ${similar.length} 个近似产品，需手动确认`;
+      specWarning = `未找到完全匹配的产品，但有 ${similar.length} 个近似产品，需手动确认`;
     } else if (!hasExactMatch && similar.length === 0) {
-      warning = '系统中未找到匹配产品，需手动录入';
+      specWarning = '系统中未找到匹配产品，需手动录入';
     }
 
     return {
@@ -197,7 +201,7 @@ router.post('/parse', (req: Request, res: Response) => {
       exactMatches,
       hasMultipleSpecs,
       hasExactMatch,
-      warning,
+      specWarning,
     };
   });
 
@@ -278,13 +282,51 @@ router.get('/:id', (req: Request, res: Response) => {
   const clinic = queryOne('SELECT * FROM clinics WHERE id = ?', [order.clinic_id]) as any;
   const images = query('SELECT * FROM order_images WHERE order_id = ?', [id]);
 
+  const itemsWithSpecCheck = items.map(item => {
+    let specWarning: string | null = null;
+    let otherSpecs: Product[] = [];
+
+    if (item.product_id && item.product_name) {
+      otherSpecs = query(
+        'SELECT id, brand, name, specification, unit, stock, price FROM products WHERE name = ? AND id != ?',
+        [item.product_name, item.product_id]
+      ) as Product[];
+    } else if (item.product_name) {
+      otherSpecs = query(
+        'SELECT id, brand, name, specification, unit, stock, price FROM products WHERE name = ?',
+        [item.product_name]
+      ) as Product[];
+    }
+
+    if (item.product_id && otherSpecs.length > 0) {
+      specWarning = `品名"${item.product_name}"还有其他规格：${otherSpecs.map(p => p.brand + ' ' + p.specification).join('、')}`;
+    } else if (!item.product_id && otherSpecs.length > 1) {
+      specWarning = `品名"${item.product_name}"存在多种规格：${otherSpecs.map(p => p.brand + ' ' + p.specification).join('、')}，请确认具体型号`;
+    }
+
+    return {
+      ...item,
+      specWarning,
+      otherSpecs: otherSpecs.length > 0 ? otherSpecs : undefined,
+    };
+  });
+
   const orderWithItems: OrderWithItems = {
     ...order,
     items,
     clinic,
   };
 
-  res.json({ ...orderWithItems, images });
+  res.json({
+    ...orderWithItems,
+    images,
+    organized: {
+      raw_content: order.raw_content || null,
+      image_count: images.length,
+      item_count: items.length,
+      items: itemsWithSpecCheck,
+    },
+  });
 });
 
 router.post('/', (req: Request, res: Response) => {
@@ -460,7 +502,31 @@ router.post('/:id/items', (req: Request, res: Response) => {
   const totalResult = queryOne('SELECT COALESCE(SUM(subtotal), 0) as total FROM order_items WHERE order_id = ?', [orderId]) as { total: number };
   run('UPDATE orders SET total_amount = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [totalResult.total, orderId]);
 
-  res.status(201).json(newItem);
+  let specWarning: string | null = null;
+  let otherSpecs: Product[] = [];
+  if (actualProductId) {
+    otherSpecs = query(
+      'SELECT id, brand, name, specification, unit, stock, price FROM products WHERE name = ? AND id != ?',
+      [actualName, actualProductId]
+    ) as Product[];
+    if (otherSpecs.length > 0) {
+      specWarning = `品名"${actualName}"存在多种规格（${otherSpecs.map(p => p.brand + ' ' + p.specification).join('、')}），请确认是否为${actualBrand} ${actualSpec}`;
+    }
+  } else if (actualName) {
+    otherSpecs = query(
+      'SELECT id, brand, name, specification, unit, stock, price FROM products WHERE name = ?',
+      [actualName]
+    ) as Product[];
+    if (otherSpecs.length > 1) {
+      specWarning = `品名"${actualName}"存在多种规格（${otherSpecs.map(p => p.brand + ' ' + p.specification).join('、')}），请确认具体型号`;
+    }
+  }
+
+  res.status(201).json({
+    item: newItem,
+    specWarning,
+    otherSpecs: otherSpecs.length > 0 ? otherSpecs : undefined,
+  });
 });
 
 router.put('/:id/items/:itemId', (req: Request, res: Response) => {

@@ -115,3 +115,15 @@ export interface OrderImage {
   uploaded_by?: string;
   created_at: string;
 }
+
+export interface ReplyVersion {
+  id: number;
+  order_id: number;
+  version_number: number;
+  reply_text: string;
+  is_confirmed: boolean;
+  confirmed_by?: string;
+  confirmed_at?: string;
+  created_by?: string;
+  created_at: string;
+}
