@@ -4,6 +4,19 @@ import { Order, OrderItem, Product, ParseResult, ParseResultItem, OrderWithItems
 
 const router = Router();
 
+const CN_NUMS: Record<string, number> = {
+  '一': 1, '二': 2, '两': 2, '三': 3, '四': 4, '五': 5,
+  '六': 6, '七': 7, '八': 8, '九': 9, '十': 10,
+};
+
+const UNIT_SET = new Set(['支', '只', '个', '盒', '包', '袋', '瓶', '管', '套', '件', '箱', '卷', '板', '片']);
+
+const KNOWN_BRANDS = [
+  '3M', '登士柏', '义获嘉', '日本马尼', 'BD', 'EMS', '赛特力', '啄木鸟',
+  '奥美科', '日本森田', '豪孚迪', '固美', '可乐丽', 'GC', 'DMG', 'IVOCLAR',
+  'VIVADENT', 'KERR', 'DENTSPLY', 'HERAEUS', 'BEGO', 'WH',
+];
+
 function generateOrderNo(): string {
   const now = new Date();
   const dateStr = now.getFullYear().toString() +
@@ -13,44 +26,74 @@ function generateOrderNo(): string {
   return `DD${dateStr}${random}`;
 }
 
-function parseQuantityUnit(text: string): { quantity: number; unit: string; rest: string } {
-  const patterns = [
-    /(\d+)\s*(支|只|个|盒|包|袋|瓶|管|套|件|箱|卷|板|片)/g,
-    /(两|二|三|四|五|六|七|八|九|十)\s*(支|只|个|盒|包|袋|瓶|管|套|件|箱|卷|板|片)/g,
-    /(\d+)\s*/g,
+function extractQuantityAndUnit(text: string): { quantity: number; unit: string; textBeforeQty: string } {
+  const numUnitRe = /(\d+)\s*(支|只|个|盒|包|袋|瓶|管|套|件|箱|卷|板|片)/;
+  const cnNumUnitRe = /(一|二|两|三|四|五|六|七|八|九|十)\s*(支|只|个|盒|包|袋|瓶|管|套|件|箱|卷|板|片)/;
+
+  let m = text.match(numUnitRe);
+  if (m && m.index !== undefined) {
+    return {
+      quantity: parseInt(m[1]) || 1,
+      unit: m[2],
+      textBeforeQty: text.substring(0, m.index).trim(),
+    };
+  }
+
+  m = text.match(cnNumUnitRe);
+  if (m && m.index !== undefined) {
+    return {
+      quantity: CN_NUMS[m[1]] || 1,
+      unit: m[2],
+      textBeforeQty: text.substring(0, m.index).trim(),
+    };
+  }
+
+  const bareNumRe = /(\d+)$/;
+  m = text.match(bareNumRe);
+  if (m && m.index !== undefined) {
+    return {
+      quantity: parseInt(m[1]) || 1,
+      unit: '',
+      textBeforeQty: text.substring(0, m.index).trim(),
+    };
+  }
+
+  return { quantity: 1, unit: '', textBeforeQty: text.trim() };
+}
+
+function extractBrand(text: string): { brand: string; rest: string } {
+  for (const brand of KNOWN_BRANDS) {
+    if (text.startsWith(brand)) {
+      return { brand, rest: text.substring(brand.length).trim() };
+    }
+    const withSpace = brand + ' ';
+    if (text.startsWith(withSpace)) {
+      return { brand, rest: text.substring(withSpace.length).trim() };
+    }
+  }
+  return { brand: '', rest: text };
+}
+
+function extractSpec(text: string): { spec: string; rest: string } {
+  const specPatterns = [
+    /([A-Z]\d+)/,
+    /(\d+G)/,
+    /(\d+#[^\s]*)/,
+    /(06锥度\s*\d+#)/,
+    /(大号|小号|中号|粗|细|长|短|通用型|牙周型)/,
   ];
 
-  const cnNums: Record<string, number> = {
-    '一': 1, '二': 2, '两': 2, '三': 3, '四': 4, '五': 5,
-    '六': 6, '七': 7, '八': 8, '九': 9, '十': 10,
-  };
-
-  for (const pattern of patterns) {
-    const match = text.match(pattern);
-    if (match) {
-      const lastMatch = match[match.length - 1];
-      const idx = text.lastIndexOf(lastMatch);
-      const rest = text.substring(0, idx).trim();
-
-      const numMatch = lastMatch.match(/(\d+|一|二|两|三|四|五|六|七|八|九|十)/);
-      const unitMatch = lastMatch.match(/(支|只|个|盒|包|袋|瓶|管|套|件|箱|卷|板|片)/);
-
-      let quantity = 1;
-      let unit = '';
-
-      if (numMatch) {
-        const numStr = numMatch[1];
-        quantity = cnNums[numStr] || parseInt(numStr) || 1;
-      }
-      if (unitMatch) {
-        unit = unitMatch[1];
-      }
-
-      return { quantity, unit, rest };
+  for (const pat of specPatterns) {
+    const m = text.match(pat);
+    if (m && m.index !== undefined) {
+      const before = text.substring(0, m.index).trim();
+      const after = text.substring(m.index + m[0].length).trim();
+      const rest = (before + ' ' + after).trim();
+      return { spec: m[1].trim(), rest };
     }
   }
 
-  return { quantity: 1, unit: '', rest: text.trim() };
+  return { spec: '', rest: text };
 }
 
 function parseOrderText(rawText: string): ParseResult {
@@ -64,27 +107,21 @@ function parseOrderText(rawText: string): ParseResult {
     const trimmed = part.trim();
     if (!trimmed) continue;
 
-    const { quantity, unit, rest } = parseQuantityUnit(trimmed);
+    const { quantity, unit, textBeforeQty } = extractQuantityAndUnit(trimmed);
 
-    let productName = rest;
-    let specification = '';
+    const { brand, rest: afterBrand } = extractBrand(textBeforeQty);
 
-    const specMatch = rest.match(/([A-Za-z]\d+|[A-Za-z]+\s*\d+|\d+\s*[A-Za-z]+|大号|小号|中号|粗|细|长|短)/);
-    if (specMatch) {
-      specification = specMatch[0].trim();
-      productName = rest.replace(specMatch[0], '').trim();
-    }
+    const { spec, rest: productName } = extractSpec(afterBrand);
 
-    if (!productName && specification) {
-      productName = specification;
-      specification = '';
-    }
+    const cleanName = productName.replace(/\s+/g, ' ').trim();
 
-    if (productName) {
+    if (cleanName || brand || spec) {
       items.push({
-        product_name: productName,
-        specification: specification,
+        brand,
+        product_name: cleanName,
+        specification: spec,
         quantity,
+        unit,
         raw_text: trimmed,
       });
     }
@@ -93,17 +130,25 @@ function parseOrderText(rawText: string): ParseResult {
   return { items, warnings };
 }
 
-function findSimilarProducts(productName: string, spec: string): Product[] {
+function findSimilarProducts(productName: string, spec: string, brand?: string): Product[] {
   let sql = `
     SELECT id, brand, name, specification, unit, stock, price
     FROM products
-    WHERE name LIKE ?
+    WHERE 1=1
   `;
-  const params: any[] = [`%${productName}%`];
+  const params: any[] = [];
 
+  if (productName) {
+    sql += ' AND name LIKE ?';
+    params.push(`%${productName}%`);
+  }
   if (spec) {
     sql += ' AND specification LIKE ?';
     params.push(`%${spec}%`);
+  }
+  if (brand) {
+    sql += ' AND brand LIKE ?';
+    params.push(`%${brand}%`);
   }
 
   sql += ' ORDER BY name, brand, specification LIMIT 10';
@@ -122,24 +167,48 @@ router.post('/parse', (req: Request, res: Response) => {
   const result = parseOrderText(text);
 
   const itemsWithSimilar = result.items.map(item => {
-    const similar = findSimilarProducts(item.product_name, item.specification);
-    const hasMultipleSpecs = similar.length > 1;
+    const similar = findSimilarProducts(item.product_name, item.specification, item.brand);
+
+    const exactMatches = similar.filter(p =>
+      p.name === item.product_name &&
+      (!item.specification || p.specification === item.specification) &&
+      (!item.brand || p.brand === item.brand)
+    );
+
+    const sameNameDiffSpec = similar.filter(p =>
+      p.name === item.product_name && p.specification !== (item.specification || '')
+    );
+
+    const hasMultipleSpecs = sameNameDiffSpec.length > 0;
+    const hasExactMatch = exactMatches.length > 0;
+
+    let warning: string | null = null;
+    if (hasMultipleSpecs) {
+      warning = `品名"${item.product_name}"存在多种规格（${sameNameDiffSpec.map(p => p.brand + ' ' + p.specification).join('、')}），请确认具体型号，防止发错货`;
+    } else if (!hasExactMatch && similar.length > 0) {
+      warning = `未找到完全匹配的产品，但有 ${similar.length} 个近似产品，需手动确认`;
+    } else if (!hasExactMatch && similar.length === 0) {
+      warning = '系统中未找到匹配产品，需手动录入';
+    }
+
     return {
       ...item,
       similarProducts: similar,
+      exactMatches,
       hasMultipleSpecs,
-      warning: hasMultipleSpecs
-        ? `检测到 ${similar.length} 个同名不同规格的产品，请确认具体型号`
-        : similar.length === 0
-        ? '系统中未找到匹配产品，需手动确认'
-        : null,
+      hasExactMatch,
+      warning,
     };
   });
 
   const multipleSpecCount = itemsWithSimilar.filter(i => i.hasMultipleSpecs).length;
+  const noMatchCount = itemsWithSimilar.filter(i => !i.hasExactMatch).length;
   const globalWarnings: string[] = [];
   if (multipleSpecCount > 0) {
     globalWarnings.push(`共 ${multipleSpecCount} 项存在同名不同规格情况，请注意核对规格，防止发错货`);
+  }
+  if (noMatchCount > 0) {
+    globalWarnings.push(`共 ${noMatchCount} 项未找到精确匹配，需要客服手动确认`);
   }
 
   res.json({
@@ -207,6 +276,7 @@ router.get('/:id', (req: Request, res: Response) => {
 
   const items = query('SELECT * FROM order_items WHERE order_id = ?', [id]) as OrderItem[];
   const clinic = queryOne('SELECT * FROM clinics WHERE id = ?', [order.clinic_id]) as any;
+  const images = query('SELECT * FROM order_images WHERE order_id = ?', [id]);
 
   const orderWithItems: OrderWithItems = {
     ...order,
@@ -214,11 +284,11 @@ router.get('/:id', (req: Request, res: Response) => {
     clinic,
   };
 
-  res.json(orderWithItems);
+  res.json({ ...orderWithItems, images });
 });
 
 router.post('/', (req: Request, res: Response) => {
-  const { clinic_id, source, raw_content, items, urgency = 'normal', urgency_note, created_by } = req.body;
+  const { clinic_id, source, raw_content, items, images, urgency = 'normal', urgency_note, created_by } = req.body;
 
   if (!clinic_id || !source) {
     res.status(400).json({ error: '诊所ID和订单来源为必填项' });
@@ -285,12 +355,32 @@ router.post('/', (req: Request, res: Response) => {
     run('UPDATE orders SET total_amount = ? WHERE id = ?', [totalAmount, orderId]);
   }
 
+  if (images && images.length > 0) {
+    for (const img of images) {
+      run(
+        `INSERT INTO order_images (order_id, image_url, original_name, mime_type, file_size, description, uploaded_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          orderId,
+          img.image_url,
+          img.original_name || null,
+          img.mime_type || null,
+          img.file_size || null,
+          img.description || null,
+          img.uploaded_by || created_by || null,
+        ]
+      );
+    }
+  }
+
   const orderWithItems = queryOne('SELECT * FROM orders WHERE id = ?', [orderId]) as Order;
   const orderItems = query('SELECT * FROM order_items WHERE order_id = ?', [orderId]) as OrderItem[];
+  const orderImages = query('SELECT * FROM order_images WHERE order_id = ?', [orderId]);
 
   res.status(201).json({
     ...orderWithItems,
     items: orderItems,
+    images: orderImages,
   });
 });
 
@@ -449,6 +539,57 @@ router.delete('/:id/items/:itemId', (req: Request, res: Response) => {
   run('UPDATE orders SET total_amount = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [totalResult.total, existing.order_id]);
 
   res.json({ message: '删除成功' });
+});
+
+router.get('/:id/images', (req: Request, res: Response) => {
+  const orderId = parseInt(req.params.id);
+
+  const order = queryOne('SELECT * FROM orders WHERE id = ?', [orderId]);
+  if (!order) {
+    res.status(404).json({ error: '订单不存在' });
+    return;
+  }
+
+  const images = query('SELECT * FROM order_images WHERE order_id = ?', [orderId]);
+  res.json({ data: images, total: images.length });
+});
+
+router.post('/:id/images', (req: Request, res: Response) => {
+  const orderId = parseInt(req.params.id);
+  const { image_url, original_name, mime_type, file_size, description, uploaded_by } = req.body;
+
+  const order = queryOne('SELECT * FROM orders WHERE id = ?', [orderId]);
+  if (!order) {
+    res.status(404).json({ error: '订单不存在' });
+    return;
+  }
+
+  if (!image_url) {
+    res.status(400).json({ error: '图片地址(image_url)为必填项' });
+    return;
+  }
+
+  const result = run(
+    `INSERT INTO order_images (order_id, image_url, original_name, mime_type, file_size, description, uploaded_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [orderId, image_url, original_name || null, mime_type || null, file_size || null, description || null, uploaded_by || null]
+  );
+
+  const image = queryOne('SELECT * FROM order_images WHERE id = ?', [result.lastInsertRowid]);
+  res.status(201).json(image);
+});
+
+router.delete('/:id/images/:imageId', (req: Request, res: Response) => {
+  const imageId = parseInt(req.params.imageId);
+
+  const existing = queryOne('SELECT * FROM order_images WHERE id = ?', [imageId]);
+  if (!existing) {
+    res.status(404).json({ error: '图片不存在' });
+    return;
+  }
+
+  run('DELETE FROM order_images WHERE id = ?', [imageId]);
+  res.json({ message: '图片已删除' });
 });
 
 export default router;

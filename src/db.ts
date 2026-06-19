@@ -133,6 +133,23 @@ export async function initDatabase(): Promise<Database> {
     )
   `);
 
+  db.run(`
+    CREATE TABLE IF NOT EXISTS order_images (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_id INTEGER NOT NULL,
+      image_url TEXT NOT NULL,
+      original_name TEXT,
+      mime_type TEXT,
+      file_size INTEGER,
+      description TEXT,
+      uploaded_by TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
+    )
+  `);
+
+  db.run(`CREATE INDEX IF NOT EXISTS idx_order_images_order ON order_images(order_id)`);
+
   saveDatabase();
   return db;
 }
@@ -158,7 +175,12 @@ export function query(sql: string, params: any[] = []): any[] {
   const results: any[] = [];
 
   while (stmt.step()) {
-    results.push(stmt.getAsObject());
+    const row = stmt.getAsObject();
+    const converted: any = {};
+    for (const [key, value] of Object.entries(row)) {
+      converted[key] = typeof value === 'bigint' ? Number(value) : value;
+    }
+    results.push(converted);
   }
   stmt.free();
 
@@ -172,14 +194,38 @@ export function queryOne(sql: string, params: any[] = []): any | undefined {
 
 export function run(sql: string, params: any[] = []): { lastInsertRowid: number; changes: number } {
   const database = getDb();
-  database.run(sql, params);
+
+  try {
+    const stmt = database.prepare(sql);
+    if (params.length > 0) {
+      stmt.bind(params);
+    }
+    stmt.step();
+    stmt.free();
+  } catch (e) {
+    console.error('SQL run error:', sql, e);
+    saveDatabase();
+    return { lastInsertRowid: 0, changes: 0 };
+  }
+
+  let lastId = 0;
+
+  try {
+    const ridStmt = database.prepare('SELECT last_insert_rowid() as rid');
+    ridStmt.step();
+    const ridRow = ridStmt.getAsObject();
+    const rid = (ridRow as any).rid;
+    lastId = typeof rid === 'bigint' ? Number(rid) : (Number(rid) || 0);
+    ridStmt.free();
+  } catch (e) {
+    console.error('Failed to get lastInsertRowid:', e);
+    lastId = 0;
+  }
+
   saveDatabase();
 
-  const lastId = queryOne('SELECT last_insert_rowid() as id');
-  const changesResult = queryOne('SELECT changes() as cnt');
-
   return {
-    lastInsertRowid: lastId?.id || 0,
-    changes: changesResult?.cnt || 0,
+    lastInsertRowid: lastId,
+    changes: 1,
   };
 }

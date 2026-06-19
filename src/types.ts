@@ -90,9 +90,11 @@ export interface OrderWithItems extends Order {
 }
 
 export interface ParseResultItem {
+  brand: string;
   product_name: string;
   specification: string;
   quantity: number;
+  unit: string;
   raw_text: string;
   similarProducts?: Product[];
 }
@@ -100,4 +102,16 @@ export interface ParseResultItem {
 export interface ParseResult {
   items: ParseResultItem[];
   warnings: string[];
+}
+
+export interface OrderImage {
+  id: number;
+  order_id: number;
+  image_url: string;
+  original_name?: string;
+  mime_type?: string;
+  file_size?: number;
+  description?: string;
+  uploaded_by?: string;
+  created_at: string;
 }

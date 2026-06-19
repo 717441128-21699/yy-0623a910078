@@ -60,10 +60,23 @@ router.post('/order-item/:itemId/plan', (req: Request, res: Response) => {
     return;
   }
 
+  let finalAltBrand = alternative_brand || null;
+  let finalAltSpec = alternative_spec || null;
+  let finalAltProductId = alternative_product_id || null;
+
   if (plan_type === 'alternative') {
     if (!alternative_product_id && !alternative_brand) {
       res.status(400).json({ error: '替代方案需要提供替代产品ID或替代品牌' });
       return;
+    }
+
+    if (alternative_product_id) {
+      const altProduct = queryOne('SELECT * FROM products WHERE id = ?', [alternative_product_id]) as Product;
+      if (altProduct) {
+        finalAltBrand = altProduct.brand;
+        finalAltSpec = altProduct.specification;
+        finalAltProductId = altProduct.id;
+      }
     }
   }
   if (plan_type === 'restock' && !restock_date) {
@@ -86,9 +99,9 @@ router.post('/order-item/:itemId/plan', (req: Request, res: Response) => {
     [
       itemId,
       plan_type,
-      alternative_brand || null,
-      alternative_spec || null,
-      alternative_product_id || null,
+      finalAltBrand,
+      finalAltSpec,
+      finalAltProductId,
       restock_date || null,
       split_shipment || null,
     ]
@@ -101,7 +114,16 @@ router.post('/order-item/:itemId/plan', (req: Request, res: Response) => {
     run("UPDATE orders SET status = 'stockout_handling', updated_at = CURRENT_TIMESTAMP WHERE id = ?", [item.order_id]);
   }
 
-  res.status(201).json(plan);
+  let alternativeProduct: Product | undefined;
+  if (finalAltProductId) {
+    alternativeProduct = queryOne('SELECT * FROM products WHERE id = ?', [finalAltProductId]) as Product;
+  }
+
+  res.status(201).json({
+    plan,
+    alternativeProduct,
+    autoFilled: !!(alternative_product_id && !alternative_brand),
+  });
 });
 
 router.get('/order-item/:itemId/plan', (req: Request, res: Response) => {
@@ -173,16 +195,27 @@ function generateReplyContent(orderId: number): string {
 
       if (plan) {
         switch (plan.plan_type) {
-          case 'alternative':
-            reply += `   → 处理方案：更换替代品牌\n`;
-            if (plan.alternative_brand) {
-              reply += `     替代品牌：${plan.alternative_brand}`;
-              if (plan.alternative_spec) {
-                reply += ` ${plan.alternative_spec}`;
+          case 'alternative': {
+            let altBrand = plan.alternative_brand || '';
+            let altSpec = plan.alternative_spec || '';
+            let altName = '';
+
+            if (plan.alternative_product_id) {
+              const altProduct = queryOne('SELECT * FROM products WHERE id = ?', [plan.alternative_product_id]) as Product;
+              if (altProduct) {
+                altBrand = altProduct.brand;
+                altName = altProduct.name;
+                altSpec = altProduct.specification;
               }
-              reply += '\n';
+            }
+
+            reply += `   → 处理方案：更换替代品牌\n`;
+            const altParts = [altBrand, altName, altSpec].filter(Boolean);
+            if (altParts.length > 0) {
+              reply += `     替代产品：${altParts.join(' ')}\n`;
             }
             break;
+          }
           case 'restock':
             reply += `   → 处理方案：等待补货\n`;
             if (plan.restock_date) {
