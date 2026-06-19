@@ -8,7 +8,8 @@
     "start": "node dist/server.js",
     "dev": "ts-node src/server.ts",
     "seed": "ts-node src/seed.ts",
-    "test-api": "ts-node src/test-api.ts"
+    "test-api": "ts-node src/test-api.ts",
+    "test-api-negative": "set NEGATIVE_TEST=1&& ts-node src/test-api.ts"
   },
   "dependencies": {
     "express": "^4.18.2",

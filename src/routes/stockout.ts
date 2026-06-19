@@ -4,6 +4,15 @@ import { StockoutPlan, Product, OrderItem, Order, ReplyVersion } from '../types'
 
 const router = Router();
 
+function convertReplyVersion(row: any): ReplyVersion {
+  const cv: any = {};
+  for (const [key, value] of Object.entries(row)) {
+    cv[key] = typeof value === 'bigint' ? Number(value) : value;
+  }
+  cv.is_confirmed = !!cv.is_confirmed;
+  return cv as ReplyVersion;
+}
+
 function findAlternatives(productName: string, excludeProductId?: number): Product[] {
   let sql = `
     SELECT p.id, p.brand, p.name, p.specification, p.unit, p.stock, p.price
@@ -271,24 +280,194 @@ router.get('/order/:orderId/reply', (req: Request, res: Response) => {
 
   const { created_by } = req.query;
   const result = run(
-    `INSERT INTO reply_versions (order_id, version_number, reply_text, created_by)
-     VALUES (?, ?, ?, ?)`,
+    `INSERT INTO reply_versions (order_id, version_number, reply_text, status, created_by)
+     VALUES (?, ?, ?, 'pending', ?)`,
     [orderId, nextVersion, replyText, (created_by as string) || null]
   );
 
-  const savedVersion = queryOne('SELECT * FROM reply_versions WHERE id = ?', [result.lastInsertRowid]) as any;
-
-  const converted: any = {};
-  for (const [key, value] of Object.entries(savedVersion)) {
-    (converted as any)[key] = typeof value === 'bigint' ? Number(value) : value;
-  }
-  converted.is_confirmed = !!converted.is_confirmed;
+  const savedVersion = queryOne('SELECT * FROM reply_versions WHERE id = ?', [result.lastInsertRowid]);
 
   res.json({
     order_id: orderId,
     reply_text: replyText,
-    version: converted,
+    version: savedVersion ? convertReplyVersion(savedVersion) : null,
     generated_at: new Date().toISOString(),
+  });
+});
+
+router.post('/order/:orderId/reply/:versionId/submit', (req: Request, res: Response) => {
+  const orderId = parseInt(req.params.orderId);
+  const versionId = parseInt(req.params.versionId);
+  const { submitted_by } = req.body;
+
+  const version = queryOne(
+    'SELECT * FROM reply_versions WHERE id = ? AND order_id = ?',
+    [versionId, orderId]
+  );
+  if (!version) {
+    res.status(404).json({ error: '回复版本不存在' });
+    return;
+  }
+
+  const v = convertReplyVersion(version);
+  if (v.status !== 'pending') {
+    res.status(400).json({ error: `只有 pending 状态的版本才能提交待确认，当前状态: ${v.status}` });
+    return;
+  }
+
+  run(
+    `UPDATE reply_versions SET status = 'submitted', submitted_by = ?, submitted_at = CURRENT_TIMESTAMP WHERE id = ?`,
+    [submitted_by || null, versionId]
+  );
+
+  const updated = queryOne('SELECT * FROM reply_versions WHERE id = ?', [versionId]);
+  res.json({
+    version: updated ? convertReplyVersion(updated) : null,
+    message: '已提交待主管确认',
+  });
+});
+
+router.post('/order/:orderId/reply/:versionId/confirm', (req: Request, res: Response) => {
+  const orderId = parseInt(req.params.orderId);
+  const versionId = parseInt(req.params.versionId);
+  const { confirmed_by } = req.body;
+
+  const order = queryOne('SELECT * FROM orders WHERE id = ?', [orderId]) as Order;
+  if (!order) {
+    res.status(404).json({ error: '订单不存在' });
+    return;
+  }
+
+  const version = queryOne(
+    'SELECT * FROM reply_versions WHERE id = ? AND order_id = ?',
+    [versionId, orderId]
+  );
+  if (!version) {
+    res.status(404).json({ error: '回复版本不存在，确认失败，已确认的版本不受影响' });
+    return;
+  }
+
+  const v = convertReplyVersion(version);
+  if (v.status !== 'submitted') {
+    res.status(400).json({ error: `只有 submitted 状态的版本才能确认，当前状态: ${v.status}，已确认的版本不受影响` });
+    return;
+  }
+
+  const existingConfirmed = queryOne(
+    'SELECT * FROM reply_versions WHERE order_id = ? AND status = ?',
+    [orderId, 'confirmed']
+  );
+  const existingSent = queryOne(
+    'SELECT * FROM reply_versions WHERE order_id = ? AND status = ?',
+    [orderId, 'sent']
+  );
+
+  if (existingConfirmed) {
+    run(
+      `UPDATE reply_versions SET status = 'replaced' WHERE id = ?`,
+      [existingConfirmed.id]
+    );
+  }
+  if (existingSent) {
+    run(
+      `UPDATE reply_versions SET status = 'replaced' WHERE id = ?`,
+      [existingSent.id]
+    );
+  }
+
+  run(
+    `UPDATE reply_versions SET status = 'confirmed', is_confirmed = 1, confirmed_by = ?, confirmed_at = CURRENT_TIMESTAMP WHERE id = ?`,
+    [confirmed_by || null, versionId]
+  );
+
+  run(
+    `UPDATE orders SET status = 'ready_to_ship', updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+    [orderId]
+  );
+
+  run(
+    `INSERT INTO order_logs (order_id, action, operator, detail)
+     VALUES (?, 'stockout_confirmed', ?, ?)`,
+    [orderId, confirmed_by || null, v.reply_text || null]
+  );
+
+  const updated = queryOne('SELECT * FROM reply_versions WHERE id = ?', [versionId]);
+  const updatedOrder = queryOne('SELECT * FROM orders WHERE id = ?', [orderId]);
+
+  const updatedPreviousConfirmed = existingConfirmed
+    ? queryOne('SELECT * FROM reply_versions WHERE id = ?', [existingConfirmed.id])
+    : null;
+
+  res.json({
+    order: updatedOrder,
+    confirmed_version: updated ? convertReplyVersion(updated) : null,
+    previous_confirmed_version: updatedPreviousConfirmed ? convertReplyVersion(updatedPreviousConfirmed) : null,
+    previous_sent_version: existingSent ? convertReplyVersion(existingSent) : null,
+    message: '主管确认成功，此版本当前有效',
+  });
+});
+
+router.post('/order/:orderId/reply/:versionId/reject', (req: Request, res: Response) => {
+  const orderId = parseInt(req.params.orderId);
+  const versionId = parseInt(req.params.versionId);
+  const { rejected_by, rejection_note } = req.body;
+
+  const version = queryOne(
+    'SELECT * FROM reply_versions WHERE id = ? AND order_id = ?',
+    [versionId, orderId]
+  );
+  if (!version) {
+    res.status(404).json({ error: '回复版本不存在' });
+    return;
+  }
+
+  const v = convertReplyVersion(version);
+  if (v.status !== 'submitted') {
+    res.status(400).json({ error: `只有 submitted 状态的版本才能拒绝，当前状态: ${v.status}` });
+    return;
+  }
+
+  run(
+    `UPDATE reply_versions SET status = 'rejected', rejected_by = ?, rejected_at = CURRENT_TIMESTAMP, rejection_note = ? WHERE id = ?`,
+    [rejected_by || null, rejection_note || null, versionId]
+  );
+
+  const updated = queryOne('SELECT * FROM reply_versions WHERE id = ?', [versionId]);
+  res.json({
+    version: updated ? convertReplyVersion(updated) : null,
+    message: '已拒绝该回复版本',
+  });
+});
+
+router.post('/order/:orderId/reply/:versionId/send', (req: Request, res: Response) => {
+  const orderId = parseInt(req.params.orderId);
+  const versionId = parseInt(req.params.versionId);
+  const { sent_by } = req.body;
+
+  const version = queryOne(
+    'SELECT * FROM reply_versions WHERE id = ? AND order_id = ?',
+    [versionId, orderId]
+  );
+  if (!version) {
+    res.status(404).json({ error: '回复版本不存在' });
+    return;
+  }
+
+  const v = convertReplyVersion(version);
+  if (v.status !== 'confirmed') {
+    res.status(400).json({ error: `只有 confirmed 状态的版本才能标记已发送，当前状态: ${v.status}` });
+    return;
+  }
+
+  run(
+    `UPDATE reply_versions SET status = 'sent', sent_by = ?, sent_at = CURRENT_TIMESTAMP WHERE id = ?`,
+    [sent_by || null, versionId]
+  );
+
+  const updated = queryOne('SELECT * FROM reply_versions WHERE id = ?', [versionId]);
+  res.json({
+    version: updated ? convertReplyVersion(updated) : null,
+    message: '已标记为已发送给诊所',
   });
 });
 
@@ -303,19 +482,23 @@ router.post('/order/:orderId/confirm', (req: Request, res: Response) => {
   }
 
   run(
-    'UPDATE reply_versions SET is_confirmed = 0 WHERE order_id = ? AND is_confirmed = 1',
-    [orderId]
+    'UPDATE reply_versions SET status = ? WHERE order_id = ? AND status = ?',
+    ['replaced', orderId, 'confirmed']
+  );
+  run(
+    'UPDATE reply_versions SET is_confirmed = 0 WHERE order_id = ? AND status = ?',
+    [orderId, 'replaced']
   );
 
   if (version_id) {
     const version = queryOne('SELECT * FROM reply_versions WHERE id = ? AND order_id = ?', [version_id, orderId]) as any;
     if (!version) {
-      res.status(404).json({ error: '回复版本不存在' });
+      res.status(404).json({ error: '回复版本不存在，确认失败，之前已确认的版本不受影响' });
       return;
     }
     run(
-      'UPDATE reply_versions SET is_confirmed = 1, confirmed_by = ?, confirmed_at = CURRENT_TIMESTAMP WHERE id = ?',
-      [confirmed_by || null, version_id]
+      'UPDATE reply_versions SET status = ?, is_confirmed = 1, confirmed_by = ?, confirmed_at = CURRENT_TIMESTAMP WHERE id = ?',
+      ['confirmed', confirmed_by || null, version_id]
     );
   }
 
@@ -337,8 +520,8 @@ router.post('/order/:orderId/confirm', (req: Request, res: Response) => {
 
     const nextVersion = (lastVersion?.version_number || 0) + 1;
     run(
-      `INSERT INTO reply_versions (order_id, version_number, reply_text, is_confirmed, confirmed_by, confirmed_at, created_by)
-       VALUES (?, ?, ?, 1, ?, CURRENT_TIMESTAMP, ?)`,
+      `INSERT INTO reply_versions (order_id, version_number, reply_text, status, is_confirmed, confirmed_by, confirmed_at, created_by)
+       VALUES (?, ?, ?, 'confirmed', 1, ?, CURRENT_TIMESTAMP, ?)`,
       [orderId, nextVersion, finalReplyText, confirmed_by || null, confirmed_by || null]
     );
   }
@@ -350,24 +533,17 @@ router.post('/order/:orderId/confirm', (req: Request, res: Response) => {
   );
 
   const confirmedVersions = query(
-    'SELECT * FROM reply_versions WHERE order_id = ? AND is_confirmed = 1 ORDER BY version_number DESC LIMIT 1',
-    [orderId]
+    'SELECT * FROM reply_versions WHERE order_id = ? AND status = ? ORDER BY version_number DESC LIMIT 1',
+    [orderId, 'confirmed']
   );
 
   const confirmedVersion = confirmedVersions[0];
-  if (confirmedVersion) {
-    const cv: any = {};
-    for (const [key, value] of Object.entries(confirmedVersion)) {
-      (cv as any)[key] = typeof value === 'bigint' ? Number(value) : value;
-    }
-    cv.is_confirmed = !!cv.is_confirmed;
-  }
 
   const updated = queryOne('SELECT * FROM orders WHERE id = ?', [orderId]) as Order;
   res.json({
     order: updated,
     reply_text: finalReplyText,
-    confirmed_version: confirmedVersion || null,
+    confirmed_version: confirmedVersion ? convertReplyVersion(confirmedVersion) : null,
   });
 });
 
@@ -385,23 +561,27 @@ router.get('/order/:orderId/reply-history', (req: Request, res: Response) => {
     [orderId]
   );
 
-  const convertedVersions = versions.map((v: any) => {
-    const cv: any = {};
-    for (const [key, value] of Object.entries(v)) {
-      (cv as any)[key] = typeof value === 'bigint' ? Number(value) : value;
-    }
-    cv.is_confirmed = !!cv.is_confirmed;
-    return cv;
-  });
+  const convertedVersions = versions.map((v: any) => convertReplyVersion(v));
 
-  const confirmedVersion = convertedVersions.find((v: any) => v.is_confirmed);
+  const confirmedVersion = convertedVersions.find((v: any) => v.status === 'confirmed');
+  const sentVersion = convertedVersions.find((v: any) => v.status === 'sent');
+  const submittedVersion = convertedVersions.find((v: any) => v.status === 'submitted');
+
+  const activeVersion = sentVersion || confirmedVersion || null;
 
   res.json({
     order_id: orderId,
     versions: convertedVersions,
     total_versions: convertedVersions.length,
+    current_active_version_id: activeVersion?.id || null,
+    current_active_version_number: activeVersion?.version_number || null,
+    current_status: activeVersion?.status || null,
     confirmed_version_id: confirmedVersion?.id || null,
     confirmed_version_number: confirmedVersion?.version_number || null,
+    sent_version_id: sentVersion?.id || null,
+    sent_version_number: sentVersion?.version_number || null,
+    submitted_version_id: submittedVersion?.id || null,
+    submitted_version_number: submittedVersion?.version_number || null,
   });
 });
 

@@ -52,6 +52,7 @@ export interface OrderItem {
   subtotal: number;
   stock_status: StockStatus;
   note?: string;
+  batch_id?: number;
 }
 
 export type StockoutPlanType = 'alternative' | 'restock' | 'split';
@@ -121,9 +122,54 @@ export interface ReplyVersion {
   order_id: number;
   version_number: number;
   reply_text: string;
+  status: 'pending' | 'submitted' | 'confirmed' | 'rejected' | 'sent' | 'replaced';
   is_confirmed: boolean;
+  submitted_by?: string;
+  submitted_at?: string;
   confirmed_by?: string;
   confirmed_at?: string;
+  rejected_by?: string;
+  rejected_at?: string;
+  rejection_note?: string;
+  sent_by?: string;
+  sent_at?: string;
   created_by?: string;
   created_at: string;
+}
+
+export interface DeliveryBatch {
+  id: number;
+  order_id: number;
+  batch_name: string;
+  batch_type: 'available' | 'out_of_stock' | 'backorder' | 'split';
+  estimated_ship_date?: string;
+  status: 'pending' | 'ready' | 'packing' | 'shipped' | 'delivered';
+  urgency: 'emergency' | 'normal' | 'routine';
+  urgency_note?: string;
+  warehouse_note?: string;
+  driver_note?: string;
+  pack_status: 'pending' | 'packing' | 'completed';
+  delivery_status: 'pending' | 'in_transit' | 'delivered' | 'failed';
+  package_count: number;
+  handed_by?: string;
+  handed_at?: string;
+  received_by?: string;
+  received_at?: string;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+  items?: OrderItem[];
+}
+
+export interface OrderCorrection {
+  id: number;
+  raw_text_pattern: string;
+  product_id: number;
+  product_name: string;
+  specification: string;
+  brand: string;
+  use_count: number;
+  corrected_by?: string;
+  created_at: string;
+  updated_at: string;
 }

@@ -79,8 +79,10 @@ export async function initDatabase(): Promise<Database> {
       subtotal REAL DEFAULT 0,
       stock_status TEXT NOT NULL DEFAULT 'available',
       note TEXT,
+      batch_id INTEGER,
       FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE,
-      FOREIGN KEY (product_id) REFERENCES products(id)
+      FOREIGN KEY (product_id) REFERENCES products(id),
+      FOREIGN KEY (batch_id) REFERENCES delivery_batches(id)
     )
   `);
 
@@ -156,9 +158,17 @@ export async function initDatabase(): Promise<Database> {
       order_id INTEGER NOT NULL,
       version_number INTEGER NOT NULL DEFAULT 1,
       reply_text TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
       is_confirmed INTEGER NOT NULL DEFAULT 0,
+      submitted_by TEXT,
+      submitted_at DATETIME,
       confirmed_by TEXT,
       confirmed_at DATETIME,
+      rejected_by TEXT,
+      rejected_at DATETIME,
+      rejection_note TEXT,
+      sent_by TEXT,
+      sent_at DATETIME,
       created_by TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
@@ -166,6 +176,52 @@ export async function initDatabase(): Promise<Database> {
   `);
 
   db.run(`CREATE INDEX IF NOT EXISTS idx_reply_versions_order ON reply_versions(order_id)`);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS delivery_batches (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_id INTEGER NOT NULL,
+      batch_name TEXT NOT NULL,
+      batch_type TEXT NOT NULL DEFAULT 'available',
+      estimated_ship_date TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      urgency TEXT DEFAULT 'normal',
+      urgency_note TEXT,
+      warehouse_note TEXT,
+      driver_note TEXT,
+      pack_status TEXT DEFAULT 'pending',
+      delivery_status TEXT DEFAULT 'pending',
+      package_count INTEGER DEFAULT 0,
+      handed_by TEXT,
+      handed_at DATETIME,
+      received_by TEXT,
+      received_at DATETIME,
+      sort_order INTEGER DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
+    )
+  `);
+
+  db.run(`CREATE INDEX IF NOT EXISTS idx_delivery_batches_order ON delivery_batches(order_id)`);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS order_corrections (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      raw_text_pattern TEXT NOT NULL UNIQUE,
+      product_id INTEGER NOT NULL,
+      product_name TEXT NOT NULL,
+      specification TEXT NOT NULL,
+      brand TEXT NOT NULL,
+      use_count INTEGER NOT NULL DEFAULT 0,
+      corrected_by TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (product_id) REFERENCES products(id)
+    )
+  `);
+
+  db.run(`CREATE INDEX IF NOT EXISTS idx_order_corrections_pattern ON order_corrections(raw_text_pattern)`);
 
   saveDatabase();
   return db;
